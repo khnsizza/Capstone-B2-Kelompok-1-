@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  # 1. Database (Postgres)
+  postgres-db:
+    image: postgres:alpine
+    container_name: postgres-db
+    environment:
+      POSTGRES_PASSWORD: rahasia
+    ports:
+      - "5432:5432"
+
+  # 2. Redis (Caching Layer)
+  redis-cache:
+    image: redis:alpine
+    container_name: redis-cache
+    ports:
+      - "6379:6379"
+
+  # 3. Zookeeper (Pendukung Kafka)
+  zookeeper:
+    image: wurstmeister/zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+
+  # 4. Kafka (Message Queue)
+  kafka-mq:
+    image: wurstmeister/kafka
+    container_name: kafka-mq
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_ADVERTISED_HOST_NAME: 127.0.0.1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+    depends_on:
+      - zookeeper
