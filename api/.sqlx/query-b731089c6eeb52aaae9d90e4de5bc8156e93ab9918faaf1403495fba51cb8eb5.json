@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT merchant_pan, acquirer_name\n                FROM merchant_infos\n                WHERE merchant_id = $1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "merchant_pan",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "acquirer_name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b731089c6eeb52aaae9d90e4de5bc8156e93ab9918faaf1403495fba51cb8eb5"
+}

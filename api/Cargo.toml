@@ -1,0 +1,17 @@
+[package]
+name = "snap-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rocket = { version = "0.5", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+redis = { version = "0.25", features = ["tokio-comp"] }
+sha2 = "0.10"
+hex = "0.4"
+sqlx = { version = "0.7", features = ["runtime-tokio", "postgres"] }
+tokio = { version = "1", features = ["full"] }
+rand = "0.8"
