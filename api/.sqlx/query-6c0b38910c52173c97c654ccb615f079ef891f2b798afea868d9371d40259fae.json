@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, name, category, city\n        FROM merchants\n        WHERE qr_code = $1\n        ",
+  "query": "\n        SELECT id, name, category, city, merchant_id\n        FROM merchants\n        WHERE qr_code = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -22,6 +22,11 @@
         "ordinal": 3,
         "name": "city",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "merchant_id",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -33,8 +38,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "d4584c5949c10e1e24af56648def30b129c34f26fb4aef36d00bacd2158600d7"
+  "hash": "6c0b38910c52173c97c654ccb615f079ef891f2b798afea868d9371d40259fae"
 }

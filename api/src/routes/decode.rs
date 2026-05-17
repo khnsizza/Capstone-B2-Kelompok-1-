@@ -7,8 +7,9 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tokio::time::{sleep, Duration};
 use rand::Rng;
-use uuid::Uuid;
 
+use crate::models::ApiResponse;
+use crate::models::Merchant;
 use crate::models::{Amount, MerchantInfo, QrDecodeRequest, QrDecodeResponse, SnapHeaders};
 
 const CACHE_TTL: u64 = 600; // 10 minutes per proposal
@@ -45,36 +46,61 @@ fn extract_amount(qr_content: &str) -> Option<Amount> {
 }
 
 fn qr_cache_key(qr_content: &str) -> String {
-    let hash = hex::encode(Sha256::digest(qr_content.as_bytes()));
+    merchant_key(qr_content)
+}
+
+fn merchant_key(qr_content: &str) -> String {
+    //let fields = parse_tlv(qr_content);
+    
+    // rebuild string without amount (54) and crc (63)
+    let mut stripped = String::new();
+    let mut i = 0;
+    while i + 4 <= qr_content.len() {
+        let tag = &qr_content[i..i+2];
+        let len: usize = match qr_content[i+2..i+4].parse() {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if i + 4 + len > qr_content.len() { break; }
+        
+        // skip amount and crc
+        if tag != "54" && tag != "63" {
+            stripped.push_str(&qr_content[i..i+4+len]);
+        }
+        i += 4 + len;
+    }
+    
+    let hash = hex::encode(Sha256::digest(stripped.as_bytes()));
     format!("merchant:{}", hash)
 }
 
-async fn query_legacy(qr_content: &str, db: &PgPool) -> QrDecodeResponse {
-    use rand::Rng;
-    use std::time::Duration;
-    use tokio::time::sleep;
-    use uuid::Uuid;
-
+async fn query_legacy(qr_content: &str, db: &PgPool) -> Option<Merchant> {
     // Simulate legacy system delay 400-700ms
     let delay = rand::thread_rng().gen_range(400..=700);
     sleep(Duration::from_millis(delay)).await;
 
     // 1. Get merchant
-    let merchant = sqlx::query!(
+    let key = merchant_key(qr_content)[9..].to_string();
+    let row = sqlx::query!(
         r#"
-        SELECT id, name, category, city
+        SELECT id, name, category, city, merchant_id
         FROM merchants
         WHERE qr_code = $1
         "#,
-        qr_content
+        key
     )
     .fetch_optional(db)
     .await;
 
-    match merchant {
+    println!("fetched!");
+    println!("qr_content: {}", key);
+    println!("fetched content: {:?}", row);
+
+    match row {
         Ok(Some(m)) => {
+            println!("matched!");
             // 2. Get PANs from merchant_infos (THIS is your fix)
-            let pans = sqlx::query!(
+            let pans: Result<Vec<_>, sqlx::Error> = sqlx::query!(
                 r#"
                 SELECT merchant_pan, acquirer_name
                 FROM merchant_infos
@@ -84,6 +110,8 @@ async fn query_legacy(qr_content: &str, db: &PgPool) -> QrDecodeResponse {
             )
             .fetch_all(db)
             .await;
+
+            println!("fetched!!");
 
             let infos = match pans {
                 Ok(rows) => rows
@@ -96,24 +124,21 @@ async fn query_legacy(qr_content: &str, db: &PgPool) -> QrDecodeResponse {
                 Err(_) => vec![],
             };
 
-            QrDecodeResponse::ok(
-                Uuid::new_v4().to_string().replace("-", ""),
-                None,
-                infos,
-                None,
-                None,
-                None,
-            )
+            println!("length: {}", infos.len());
+
+            Some(Merchant {
+                id: m.merchant_id,
+                merchant_name: m.name,
+                merchant_category: m.category,
+                merchant_location: m.city,
+                merchant_infos: infos
+            })
         }
 
-        _ => QrDecodeResponse::ok(
-            Uuid::new_v4().to_string().replace("-", ""),
-            None,
-            vec![],
-            None,
-            None,
-            None,
-        ),
+        _ => {
+            println!("Not matched!");
+            None
+        },
     }
 }
 
@@ -123,43 +148,70 @@ pub async fn qr_decode(
     _headers: SnapHeaders,
     redis: &State<RedisClient>,
     db: &State<PgPool>,
-) -> (Status, Json<QrDecodeResponse>) {
+) -> (Status, Json<ApiResponse<QrDecodeResponse>>) {
     if body.qr_content.is_empty() {
         return (
             Status::BadRequest,
-            Json(QrDecodeResponse::err(400, "02", "Invalid Mandatory Field qrContent")),
+            Json(ApiResponse::err(400, "02", "Invalid Mandatory Field qrContent")),
         );
     }
 
     if body.scan_time.is_empty() {
         return (
             Status::BadRequest,
-            Json(QrDecodeResponse::err(400, "02", "Invalid Mandatory Field scanTime")),
+            Json(ApiResponse::err(400, "02", "Invalid Mandatory Field scanTime")),
         );
     }
 
+    let transaction_amount = extract_amount(&body.qr_content);
+
     let cache_key = qr_cache_key(&body.qr_content);
+    
     let lock_key = format!("lock:{}", cache_key);
 
     let mut conn = match redis.get_async_connection().await {
         Ok(c) => c,
         Err(e) => {
             println!("redis error: {}", e);
-            let resp = query_legacy(&body.qr_content, db).await;
-            return (Status::Ok, Json(resp));
+            //let resp = query_legacy(&body.qr_content, db).await;
+            if let Some(merchant) = query_legacy(&body.qr_content,db).await {
+                return (
+                    Status::Ok,
+                    Json(
+                        ApiResponse::success(
+                            QrDecodeResponse::new(
+                                body.partner_reference_no.clone(), 
+                                merchant, 
+                                transaction_amount, 
+                                None, 
+                                None
+                            )
+                        )
+                    )
+                );
+            }
+            return (Status::NotFound, Json(ApiResponse::err(404, "08", "Invalid Merchant")))
         }
     };
 
     // ── Check cache ───────────────────────────────────────────────────────
     if let Ok(cached) = conn.get::<_, String>(&cache_key).await {
         println!("cache hit: {}", cache_key);
-        if let Ok(mut resp) = serde_json::from_str::<QrDecodeResponse>(&cached) {
-            resp.reference_no = Some(Uuid::new_v4().to_string().replace("-", ""));
-            resp.partner_reference_no = body.partner_reference_no.clone();
-            let transaction_amount = extract_amount(&body.qr_content)
-                .or_else(|| body.amount.clone());
-            resp.transaction_amount = transaction_amount;
-            return (Status::Ok, Json(resp));
+        if let Ok(merchant) = serde_json::from_str::<Merchant>(&cached) {
+            return (
+                Status::Ok,
+                Json(
+                    ApiResponse::success(
+                        QrDecodeResponse::new(
+                            body.partner_reference_no.clone(),
+                            merchant,
+                            transaction_amount, 
+                            None, 
+                            None
+                        )
+                    )
+                )
+            );
         }
     }
 
@@ -180,27 +232,51 @@ pub async fn qr_decode(
         println!("lock acquired: {}", lock_key);
 
         // ── Query legacy system ───────────────────────────────────────────
-        let mut resp = query_legacy(&body.qr_content, db).await;
+        let merchant = match query_legacy(&body.qr_content, db).await {
+            Some(merchant) => {
+                if let Ok(serialized) = serde_json::to_string(&merchant) {
+                    match conn
+                        .set_ex::<_, _, ()>(&cache_key, serialized, CACHE_TTL)
+                        .await
+                    {
+                        Ok(_) => println!("cached: {}", cache_key),
+                        Err(e) => println!("cache set error: {}", e),
+                    }
+                }
 
-        let transaction_amount = extract_amount(&body.qr_content)
-            .or_else(|| body.amount.clone());
-        resp.transaction_amount = transaction_amount;
-        resp.partner_reference_no = body.partner_reference_no.clone();
-        resp.additional_info = body.additional_info.clone();
-
-        // ── Store in cache ────────────────────────────────────────────────
-        if let Ok(serialized) = serde_json::to_string(&resp) {
-            match conn.set_ex::<_, _, ()>(&cache_key, serialized, CACHE_TTL).await {
-                Ok(_) => println!("cached: {}", cache_key),
-                Err(e) => println!("cache set error: {}", e),
+                merchant
             }
-        }
+
+            None => {
+                return (
+                    Status::NotFound,
+                    Json(ApiResponse::err(
+                        404,
+                        "08",
+                        "Invalid Merchant",
+                    )),
+                )
+            }
+        };
 
         // ── Release lock ──────────────────────────────────────────────────
         let _: Result<(), _> = conn.del(&lock_key).await;
         println!("lock released: {}", lock_key);
 
-        (Status::Ok, Json(resp))
+        (
+            Status::Ok, 
+            Json(
+                ApiResponse::success(
+                    QrDecodeResponse::new(
+                            body.partner_reference_no.clone(), 
+                            merchant, 
+                            transaction_amount, 
+                            None, 
+                            None
+                        )
+                    )
+            )
+        )
     } else {
         println!("waiting for lock: {}", lock_key);
 
@@ -209,21 +285,44 @@ pub async fn qr_decode(
             sleep(Duration::from_millis(100 * 2_u64.pow(attempt))).await;
 
             if let Ok(cached) = conn.get::<_, String>(&cache_key).await {
-                if let Ok(mut resp) = serde_json::from_str::<QrDecodeResponse>(&cached) {
-                    resp.reference_no = Some(Uuid::new_v4().to_string().replace("-", ""));
-                    resp.partner_reference_no = body.partner_reference_no.clone();
-                    let transaction_amount = extract_amount(&body.qr_content)
-                        .or_else(|| body.amount.clone());
-                    resp.transaction_amount = transaction_amount;
+                if let Ok(merchant) = serde_json::from_str::<Merchant>(&cached) {
                     println!("got cache after waiting (attempt {})", attempt + 1);
-                    return (Status::Ok, Json(resp));
+                    return (
+                        Status::Ok,
+                        Json(
+                            ApiResponse::success(
+                                QrDecodeResponse::new(
+                                    body.partner_reference_no.clone(),
+                                    merchant,
+                                    transaction_amount, 
+                                    None, 
+                                    None
+                                )
+                            )
+                        )
+                    );
                 }
             }
         }
 
         // ── Fallback: query legacy directly ───────────────────────────────
         println!("fallback: querying legacy directly");
-        let resp = query_legacy(&body.qr_content, db).await;
-        (Status::Ok, Json(resp))
+        if let Some(merchant) = query_legacy(&body.qr_content, db).await {
+            return (
+                Status::Ok,
+                Json(
+                    ApiResponse::success(
+                        QrDecodeResponse::new(
+                            body.partner_reference_no.clone(), 
+                            merchant, 
+                            transaction_amount, 
+                            None, 
+                            None
+                        )
+                    )
+                )
+            );
+        }
+        (Status::NotFound, Json(ApiResponse::err(404, "08", "Invalid Merchants")))
     }
 }

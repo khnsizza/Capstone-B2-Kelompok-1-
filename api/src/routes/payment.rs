@@ -1,12 +1,16 @@
-use chrono::Utc;
+use rdkafka::producer::FutureProducer;
+use redis::AsyncCommands;
+use redis::Client as RedisClient;
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::serde::json::Json;
-use uuid::Uuid;
+use rocket::State;
+use crate::kafka;
+use crate::models::ApiResponse;
+use crate::models::{PaymentRequest, PaymentResponse, SnapHeaders};
+use crate::routes::admin::NetworkConfig;
 
-use crate::models::{QrPaymentRequest, QrPaymentResponse, SnapHeaders};
-
-// ─── Header guard ─────────────────────────────────────────────────────────────
+const IDEMPOTENCY_TTL: u64 = 165;
 
 #[rocket::async_trait]
 impl<'r> FromRequest<'r> for SnapHeaders {
@@ -36,34 +40,65 @@ impl<'r> FromRequest<'r> for SnapHeaders {
     }
 }
 
-// ─── Route ────────────────────────────────────────────────────────────────────
-
 #[post("/v1.0/qr/qr-mpm-payment", format = "json", data = "<body>")]
 pub async fn qr_payment(
-    body: Json<QrPaymentRequest>,
+    body: Json<PaymentRequest>,
     _headers: SnapHeaders,
-) -> (Status, Json<QrPaymentResponse>) {
-    let partner_reference_no = match &body.partner_reference_no {
+    redis: &State<RedisClient>,
+    kafka: &State<FutureProducer>,
+    _network: &State<NetworkConfig>,
+) -> (Status, Json<ApiResponse<PaymentResponse>>) {
+    let partner_ref = match &body.partner_reference_no {
         Some(v) if !v.is_empty() => v.clone(),
         _ => return (
             Status::BadRequest,
-            Json(QrPaymentResponse::err(400, "02", "Invalid Mandatory Field partnerReferenceNo")),
+            Json(ApiResponse::err(400, "02", "Invalid Mandatory Field partnerReferenceNo")),
         ),
     };
 
-    let reference_no = Uuid::new_v4().to_string().replace("-", "");
-    let transaction_date = Utc::now().format("%Y-%m-%dT%H:%M:%S+07:00").to_string();
+    let status_key = format!("payment_status:{}", partner_ref);
 
-    (
-        Status::Ok,
-        Json(QrPaymentResponse::ok(
-            reference_no,
-            partner_reference_no,
-            transaction_date,
-            body.amount.clone(),
-            body.fee_amount.clone(),
-            body.verification_id.clone(),
-            body.additional_info.clone(),
-        )),
-    )
+    let idempotency_key = format!("payment:{}", partner_ref);
+
+    match redis.get_async_connection().await {
+        Ok(mut conn) => {
+            // Duplicate check
+            if conn.get::<_, String>(&idempotency_key).await.is_ok() {
+                println!("duplicate payment, returning in progress: {}", partner_ref);
+                return (Status::Accepted, Json(ApiResponse::in_progress()));
+            }
+
+            let resp = PaymentResponse::new(
+                Some(partner_ref.clone()),
+                body.amount.clone(),
+                body.fee_amount.clone(),
+                body.verification_id.clone(),
+                body.additional_info.clone(),
+            );
+
+            match kafka::publish_payment(kafka, &serde_json::to_string(&body.into_inner()).unwrap()).await {
+                Ok(_) => {
+                    println!("payment published to kafka: {}", partner_ref);
+                    if let Ok(serialized) = serde_json::to_string(&resp) {
+                        let _: Result<(), _> = conn.set_ex(&idempotency_key, serialized, IDEMPOTENCY_TTL).await;
+                        println!("payment stored: {}", partner_ref);
+                        let _: Result<(), _> = conn.set_ex(&status_key, "{latestTransactionStatus:01, transactionStatusDesc:initiated}", IDEMPOTENCY_TTL).await;
+                        println!("payment status stored: {}", partner_ref);
+                    }
+                    (Status::Ok, Json(ApiResponse::success(resp)))
+                },
+                Err(e) => {
+                    println!("kafka error: {}", e);
+                    (Status::Ok, Json(ApiResponse::success(resp)))
+                },
+            }
+        }
+        Err(_e) => {
+            println!("connection error to the databse, returning in progress: {}", partner_ref);
+            return (
+                Status::Accepted,
+                Json(ApiResponse::in_progress()),
+            );
+        }
+    }
 }
