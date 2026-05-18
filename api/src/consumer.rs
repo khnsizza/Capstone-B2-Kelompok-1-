@@ -115,7 +115,7 @@ async fn process_payment(job: PaymentRequest, redis: &RedisClient, db: &Pool<Pos
     let partner_reference_no = job.partner_reference_no.as_ref().unwrap_or(&String::from("")).clone();
     let status_key = format!("payment_status:{}", partner_reference_no);
 
-    update_redis_status(redis, &status_key, "02", "paying", None).await;
+    let _ = update_redis_status(redis, &status_key, "02", "paying", None).await;
 
     for attempt in 1..=MAX_RETRIES {
         println!("attempt {} for {}", attempt, partner_reference_no);
@@ -123,13 +123,13 @@ async fn process_payment(job: PaymentRequest, redis: &RedisClient, db: &Pool<Pos
         match call_legacy(&job, db).await {
             Ok(_) => {
                 println!("payment success: {}", partner_reference_no);
-                update_redis_status(redis, &status_key, "00", "success", Some(Utc::now().format("%Y-%m-%dT%H:%M:%S+07:00").to_string())).await;
-                store_to_db(&job, db, "00", "success").await;
+                let _ = update_redis_status(redis, &status_key, "00", "success", Some(Utc::now().format("%Y-%m-%dT%H:%M:%S+07:00").to_string())).await;
+                let _ = store_to_db(&job, db, "00", "success").await;
                 return;
             }
             Err(e) => {
                 println!("attempt {} failed: {}", attempt, e);
-                update_redis_status(redis, &status_key, "03", "pending", None).await;
+                let _ = update_redis_status(redis, &status_key, "03", "pending", None).await;
                 if attempt < MAX_RETRIES {
                     sleep(Duration::from_millis(RETRY_DELAY_MS as u64)).await;
                 }
@@ -139,8 +139,8 @@ async fn process_payment(job: PaymentRequest, redis: &RedisClient, db: &Pool<Pos
 
     // All retries failed — mark as failed
     println!("payment failed after {} retries: {}", MAX_RETRIES, partner_reference_no);
-    update_redis_status(redis, &status_key, "06", "failed", None).await;
-    store_to_db(&job, db, "06", "failed").await;
+    let _ = update_redis_status(redis, &status_key, "06", "failed", None).await;
+    let _ = store_to_db(&job, db, "06", "failed").await;
 }
 
 pub async fn run_consumer(redis: RedisClient, db: Pool<Postgres>) {
