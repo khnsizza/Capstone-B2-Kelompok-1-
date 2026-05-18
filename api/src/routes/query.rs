@@ -2,6 +2,7 @@ use chrono::Utc;
 use redis::AsyncCommands;
 use redis::Client as RedisClient;
 use rocket::http::Status;
+use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use sqlx::PgPool;
@@ -23,21 +24,24 @@ async fn query_legacy(db: &PgPool, partner_reference: &str) -> Option<PaymentQue
     .await
     .ok()?;
 
-    /*Some(PaymentQueryResponse::new(
+    Some(PaymentQueryResponse::new(
         Some("12".to_string()), 
         Some(partner_reference.to_string()), 
         Some("fdfd".to_string()), 
         "fdfd".to_string(), 
-        row.status_code, 
-        row.status_desc, 
-        row.transaction_date.to_rfc3339, 
-        Amount {
-            value: row.amount.value
-        }, 
-        fee_amount, 
-        additional_info
-    )) */
-    None
+        &row.status_code, 
+        &row.status_desc, 
+        Some(row.transaction_date.to_rfc3339()), 
+        Some(Amount {
+            value: format!("{}.00", row.amount_value.unwrap_or_default().to_string()),
+            currency: row.amount_currency.unwrap_or_default(),
+        }), 
+        Some(Amount {
+            value: format!("{}.00", row.fee_value.unwrap_or_default().to_string()),
+            currency: row.fee_currency.unwrap_or_default(),
+        }),
+        None
+    ))
 }
 
 #[post("/v1.0/qr/qr-mpm-query", format = "json", data = "<body>")]
@@ -103,10 +107,10 @@ pub async fn qr_query(
                 }
                 Err(_) => {
                     // not in redis — retrieve from db
-                    (
-                        Status::NotFound,
-                        Json(ApiResponse::err(404, "", ""))
-                    )
+                    match query_legacy(db, &body.original_partner_reference_no.unwrap_or_default()).await {
+                        Some(resp) => (Status::ok, Json(ApiResponse::success(resp))),
+                        None => (Status::NotFound, Json(ApiResponse::err(404, "01", "Transaction Not Found")))
+                    }
                 }
             }
         }
