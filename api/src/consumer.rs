@@ -43,11 +43,11 @@ async fn store_to_db(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let amount_value: Option<i64> = job.amount
         .as_ref()
-        .map(|a| a.value.parse())
+        .map(|a| a.value.trim_end_matches(".00").parse())
         .transpose()?;
     let fee_value: Option<i64> = job.fee_amount
         .as_ref()
-        .map(|a| a.value.parse())
+        .map(|a| a.value.trim_end_matches(".00").parse())
         .transpose()?;
 
     sqlx::query!(
