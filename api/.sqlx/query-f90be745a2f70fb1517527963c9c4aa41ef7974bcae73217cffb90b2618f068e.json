@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT amount_value, amount_currency, fee_value, fee_currency, status_code, status_desc, transaction_date\n        FROM payment\n        WHERE partner_reference_no = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "amount_value",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "amount_currency",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "fee_value",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "fee_currency",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "status_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "status_desc",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "transaction_date",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f90be745a2f70fb1517527963c9c4aa41ef7974bcae73217cffb90b2618f068e"
+}

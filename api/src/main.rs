@@ -52,6 +52,12 @@ async fn rocket() -> Rocket<Build> {
         .await
         .expect("Failed to connect to PostgreSQL");
 
+    let redis_consumer = redis.clone();
+    let db_consumer = db.clone();
+    tokio::spawn(async move {
+        consumer::run_consumer(redis_consumer, db_consumer).await;
+    });
+
     rocket::build()
         .manage(redis)
         .manage(db)

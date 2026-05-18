@@ -1,97 +1,155 @@
+use chrono::Utc;
 use rand::Rng;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::message::Message;
 use redis::AsyncCommands;
 use redis::Client as RedisClient;
+use redis::cmd as redis_cmd;
+use sqlx::{Pool, Postgres};
 use tokio::time::{sleep, Duration};
 
-const MAX_RETRIES: u32 = 3;
-const RETRY_DELAY_MS: u64 = 1000;
+use crate::models::{PaymentQueryResponse, PaymentRequest};
 
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PaymentJob {
-    reference_no: String,
+const MAX_RETRIES: u32 = 3;
+const RETRY_DELAY_MS: u64 = 55000;
+
+/*struct PaymentJob {
     partner_reference_no: String,
-    transaction_date: String,
     amount: Option<serde_json::Value>,
     fee_amount: Option<serde_json::Value>,
     merchant_id: Option<String>,
     additional_info: Option<serde_json::Value>,
-}
+}*/
 
-async fn call_legacy(job: &PaymentJob) -> Result<(), String> {
+async fn call_legacy(job: &PaymentRequest, db: &Pool<Postgres>) -> Result<(), String> {
     // TODO: replace with real legacy system call
-    // For now simulate 400-700ms delay with 20% failure rate
+    // For now simulate 400-700ms delay with 2% failure rate
     let delay = rand::thread_rng().gen_range(400..=700);
     sleep(Duration::from_millis(delay)).await;
 
-    if rand::thread_rng().gen_bool(0.20) {
+    if rand::thread_rng().gen_bool(0.02) {
         return Err("Legacy system timeout".into());
     }
 
     Ok(())
 }
 
-async fn process_payment(job: PaymentJob, redis: &RedisClient) {
-    let status_key = format!("payment_status:{}", job.partner_reference_no);
+async fn store_to_db(
+    job: &PaymentRequest, 
+    db: &Pool<Postgres>, 
+    status_code: &str, 
+    status_desc: &str, 
+) -> Result<(), Box<dyn std::error::Error>> {
+    let amount_value: Option<i64> = job.amount
+        .as_ref()
+        .map(|a| a.value.parse())
+        .transpose()?;
+    let fee_value: Option<i64> = job.fee_amount
+        .as_ref()
+        .map(|a| a.value.parse())
+        .transpose()?;
+
+    sqlx::query!(
+        r#"
+        INSERT INTO payment (
+            partner_reference_no,
+            merchant_id,
+            sub_merchant_id,
+            amount_value,
+            amount_currency,
+            fee_value,
+            fee_currency,
+            status_code,
+            status_desc,
+            transaction_date
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        "#,
+        job.partner_reference_no.clone(),
+        job.merchant_id.clone(),
+        job.sub_merchant_id.clone(),
+        amount_value,
+        job.amount.as_ref().map(|a| a.currency.clone()),
+        fee_value,
+        job.fee_amount.as_ref().map(|a| a.currency.clone()),
+        status_code.to_string(),
+        status_desc.to_string(),
+        Utc::now()
+    )
+    .execute(db)
+    .await?;
+
+    Ok(())
+}
+
+async fn update_redis_status(
+    redis: &RedisClient, 
+    key: &str, 
+    status_code: &str, 
+    status_desc: &str, 
+    paid_time: Option<String>
+) -> Result<(), Box<dyn std::error::Error>> {
+
+    let mut conn = redis.get_async_connection().await?;
+
+    let raw: String = conn.get(key).await?;
+
+    let mut status: PaymentQueryResponse = serde_json::from_str(&raw)?;
+
+    status.latest_transaction_status = status_code.to_string();
+    status.transaction_status_desc = status_desc.to_string();
+    status.paid_time = paid_time;
+
+    redis_cmd("SET")
+        .arg(key)
+        .arg(serde_json::to_string(&status)?)
+        .arg("KEEPTTL")
+        .query_async::<_, ()>(&mut conn)
+        .await?;
+
+    Ok(())
+}
+
+async fn process_payment(job: PaymentRequest, redis: &RedisClient, db: &Pool<Postgres>) {
+    let partner_reference_no = job.partner_reference_no.as_ref().unwrap_or(&String::from("")).clone();
+    let status_key = format!("payment_status:{}", partner_reference_no);
+
+    update_redis_status(redis, &status_key, "02", "paying", None);
 
     for attempt in 1..=MAX_RETRIES {
-        println!("attempt {} for {}", attempt, job.partner_reference_no);
+        println!("attempt {} for {}", attempt, partner_reference_no);
 
-        match call_legacy(&job).await {
+        match call_legacy(&job, db).await {
             Ok(_) => {
-                println!("payment success: {}", job.partner_reference_no);
-                let status = serde_json::json!({
-                    "status": "00",
-                    "desc": "success",
-                    "referenceNo": job.reference_no,
-                    "partnerReferenceNo": job.partner_reference_no,
-                    "paidTime": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+07:00").to_string(),
-                    "amount": job.amount,
-                });
-                if let Ok(mut conn) = redis.get_async_connection().await {
-                    let _: Result<(), _> = conn.set_ex(
-                        &status_key,
-                        status.to_string(),
-                        600,
-                    ).await;
-                }
+                println!("payment success: {}", partner_reference_no);
+                update_redis_status(redis, &status_key, "00", "success", Some(Utc::now().format("%Y-%m-%dT%H:%M:%S+07:00").to_string()));
+                store_to_db(&job, db, "00", "success");
                 return;
             }
             Err(e) => {
                 println!("attempt {} failed: {}", attempt, e);
+                update_redis_status(redis, &status_key, "03", "pending", None);
                 if attempt < MAX_RETRIES {
-                    sleep(Duration::from_millis(RETRY_DELAY_MS * attempt as u64)).await;
+                    sleep(Duration::from_millis(RETRY_DELAY_MS as u64)).await;
                 }
             }
         }
     }
 
     // All retries failed — mark as failed
-    println!("payment failed after {} retries: {}", MAX_RETRIES, job.partner_reference_no);
-    let status = serde_json::json!({
-        "status": "06",
-        "desc": "failed",
-        "referenceNo": job.reference_no,
-        "partnerReferenceNo": job.partner_reference_no,
-    });
-    if let Ok(mut conn) = redis.get_async_connection().await {
-        let _: Result<(), _> = conn.set_ex(
-            &status_key,
-            status.to_string(),
-            600,
-        ).await;
-    }
+    println!("payment failed after {} retries: {}", MAX_RETRIES, partner_reference_no);
+    update_redis_status(redis, &status_key, "06", "failed", None);
+    store_to_db(&job, db, "06", "failed");
 }
 
-pub async fn run_consumer(redis: RedisClient) {
+pub async fn run_consumer(redis: RedisClient, db: Pool<Postgres>) {
     let consumer: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", "localhost:9092")
         .set("group.id", "payment-consumer")
         .set("auto.offset.reset", "earliest")
         .set("enable.auto.commit", "false")
+        .set("auto.offset.reset", "latest")
         .create()
         .expect("Failed to create Kafka consumer");
 
@@ -110,11 +168,12 @@ pub async fn run_consumer(redis: RedisClient) {
                     }
                 };
 
-                match serde_json::from_str::<PaymentJob>(&payload) {
+                match serde_json::from_str::<PaymentRequest>(&payload) {
                     Ok(job) => {
                         let redis_clone = redis.clone();
+                        let db_clone = db.clone();
                         tokio::spawn(async move {
-                            process_payment(job, &redis_clone).await;
+                            process_payment(job, &redis_clone, &db_clone).await;
                         });
                         consumer.commit_message(&msg, CommitMode::Async).unwrap();
                     }

@@ -237,7 +237,7 @@ impl ApplyOttResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct QrQueryRequest {
+pub struct PaymentQueryRequest {
     pub original_reference_no: Option<String>,
     pub original_partner_reference_no: Option<String>,
     pub original_external_id: Option<String>,
@@ -248,11 +248,9 @@ pub struct QrQueryRequest {
     pub additional_info: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct QrQueryResponse {
-    pub response_code: String,
-    pub response_message: String,
+pub struct PaymentQueryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_reference_no: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -261,8 +259,7 @@ pub struct QrQueryResponse {
     pub original_external_id: Option<String>,
     pub service_code: String,
     pub latest_transaction_status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transaction_status_desc: Option<String>,
+    pub transaction_status_desc: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paid_time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,8 +272,10 @@ pub struct QrQueryResponse {
     pub additional_info: Option<serde_json::Value>,
 }
 
-impl QrQueryResponse {
-    pub fn ok(
+impl ApiResponseContent for PaymentQueryResponse {}
+
+impl PaymentQueryResponse {
+    pub fn new(
         original_reference_no: Option<String>,
         original_partner_reference_no: Option<String>,
         original_external_id: Option<String>,
@@ -289,37 +288,17 @@ impl QrQueryResponse {
         additional_info: Option<serde_json::Value>,
     ) -> Self {
         Self {
-            response_code: "2005100".into(),
-            response_message: "Request has been processed successfully".into(),
             original_reference_no,
             original_partner_reference_no,
             original_external_id,
             service_code,
             latest_transaction_status: latest_transaction_status.into(),
-            transaction_status_desc: Some(transaction_status_desc.into()),
+            transaction_status_desc: transaction_status_desc.into(),
             paid_time,
             amount,
             fee_amount,
             terminal_id: None,
             additional_info,
-        }
-    }
-
-    pub fn err(http: u16, case: &str, message: &str) -> Self {
-        Self {
-            response_code: format!("{}51{}", http, case),
-            response_message: message.into(),
-            original_reference_no: None,
-            original_partner_reference_no: None,
-            original_external_id: None,
-            service_code: "51".into(),
-            latest_transaction_status: "07".into(),
-            transaction_status_desc: Some("Not found".into()),
-            paid_time: None,
-            amount: None,
-            fee_amount: None,
-            terminal_id: None,
-            additional_info: None,
         }
     }
 }

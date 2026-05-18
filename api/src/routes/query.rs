@@ -1,21 +1,56 @@
+use chrono::Utc;
 use redis::AsyncCommands;
 use redis::Client as RedisClient;
 use rocket::http::Status;
 use rocket::serde::json::Json;
 use rocket::State;
+use sqlx::PgPool;
 
-use crate::models::{QrQueryRequest, QrQueryResponse, SnapHeaders};
+use crate::models::Amount;
+use crate::models::ApiResponse;
+use crate::models::{PaymentQueryRequest, PaymentQueryResponse, SnapHeaders};
+
+async fn query_legacy(db: &PgPool, partner_reference: &str) -> Option<PaymentQueryResponse> {
+    let row = sqlx::query!(
+        r#"
+        SELECT amount_value, amount_currency, fee_value, fee_currency, status_code, status_desc, transaction_date
+        FROM payment
+        WHERE partner_reference_no = $1
+        "#,
+        partner_reference
+    )
+    .fetch_one(db)
+    .await
+    .ok()?;
+
+    /*Some(PaymentQueryResponse::new(
+        Some("12".to_string()), 
+        Some(partner_reference.to_string()), 
+        Some("fdfd".to_string()), 
+        "fdfd".to_string(), 
+        row.status_code, 
+        row.status_desc, 
+        row.transaction_date.to_rfc3339, 
+        Amount {
+            value: row.amount.value
+        }, 
+        fee_amount, 
+        additional_info
+    )) */
+    None
+}
 
 #[post("/v1.0/qr/qr-mpm-query", format = "json", data = "<body>")]
 pub async fn qr_query(
-    body: Json<QrQueryRequest>,
+    body: Json<PaymentQueryRequest>,
     _headers: SnapHeaders,
     redis: &State<RedisClient>,
-) -> (Status, Json<QrQueryResponse>) {
+    db: &State<PgPool>,
+) -> (Status, Json<ApiResponse<PaymentQueryResponse>>) {
     if body.service_code.is_empty() {
         return (
             Status::BadRequest,
-            Json(QrQueryResponse::err(400, "02", "Invalid Mandatory Field serviceCode")),
+            Json(ApiResponse::err(400, "02", "Invalid Mandatory Field serviceCode")),
         );
     }
 
@@ -23,7 +58,7 @@ pub async fn qr_query(
         Some(v) if !v.is_empty() => v.clone(),
         _ => return (
             Status::BadRequest,
-            Json(QrQueryResponse::err(400, "02", "Invalid Mandatory Field originalPartnerReferenceNo")),
+            Json(ApiResponse::err(400, "02", "Invalid Mandatory Field originalPartnerReferenceNo")),
         ),
     };
 
@@ -34,67 +69,43 @@ pub async fn qr_query(
             println!("redis error: {}", e);
             (
                 Status::InternalServerError,
-                Json(QrQueryResponse::err(500, "00", "General Error")),
+                Json(ApiResponse::err(500, "00", "General Error")),
             )
         }
         Ok(mut conn) => {
             match conn.get::<_, String>(&status_key).await {
                 Ok(cached) => {
-                    if let Ok(status) = serde_json::from_str::<serde_json::Value>(&cached) {
-                        let code = status["status"].as_str().unwrap_or("03");
-                        let desc = status["desc"].as_str().unwrap_or("pending");
-                        let paid_time = status["paidTime"].as_str().map(String::from);
-
+                    if let Ok(status) = serde_json::from_str::<PaymentQueryResponse>(&cached) {
                         return (
                             Status::Ok,
-                            Json(QrQueryResponse::ok(
-                                body.original_reference_no.clone(),
-                                body.original_partner_reference_no.clone(),
-                                body.original_external_id.clone(),
-                                body.service_code.clone(),
-                                code,
-                                desc,
-                                paid_time,
-                                None,
-                                None,
-                                body.additional_info.clone(),
-                            )),
+                            Json(ApiResponse::success(status)),
                         );
                     }
 
                     // cached but couldn't deserialize — treat as pending
                     (
                         Status::Ok,
-                        Json(QrQueryResponse::ok(
-                            body.original_reference_no.clone(),
-                            body.original_partner_reference_no.clone(),
-                            body.original_external_id.clone(),
-                            body.service_code.clone(),
-                            "03",
-                            "pending",
-                            None,
-                            None,
-                            None,
-                            body.additional_info.clone(),
+                        Json(ApiResponse::success(
+                            PaymentQueryResponse::new(
+                                body.original_reference_no.clone(),
+                                body.original_partner_reference_no.clone(),
+                                body.original_external_id.clone(),
+                                body.service_code.clone(),
+                                "03",
+                                "pending",
+                                None,
+                                None,
+                                None,
+                                body.additional_info.clone(),
+                            )
                         )),
                     )
                 }
                 Err(_) => {
-                    // not in redis yet — still processing
+                    // not in redis — retrieve from db
                     (
-                        Status::Ok,
-                        Json(QrQueryResponse::ok(
-                            body.original_reference_no.clone(),
-                            body.original_partner_reference_no.clone(),
-                            body.original_external_id.clone(),
-                            body.service_code.clone(),
-                            "03",
-                            "pending",
-                            None,
-                            None,
-                            None,
-                            body.additional_info.clone(),
-                        )),
+                        Status::NotFound,
+                        Json(ApiResponse::err(404, "", ""))
                     )
                 }
             }

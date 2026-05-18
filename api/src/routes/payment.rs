@@ -7,6 +7,7 @@ use rocket::serde::json::Json;
 use rocket::State;
 use crate::kafka;
 use crate::models::ApiResponse;
+use crate::models::PaymentQueryResponse;
 use crate::models::{PaymentRequest, PaymentResponse, SnapHeaders};
 use crate::routes::admin::NetworkConfig;
 
@@ -43,7 +44,7 @@ impl<'r> FromRequest<'r> for SnapHeaders {
 #[post("/v1.0/qr/qr-mpm-payment", format = "json", data = "<body>")]
 pub async fn qr_payment(
     body: Json<PaymentRequest>,
-    _headers: SnapHeaders,
+    headers: SnapHeaders,
     redis: &State<RedisClient>,
     kafka: &State<FutureProducer>,
     _network: &State<NetworkConfig>,
@@ -76,13 +77,27 @@ pub async fn qr_payment(
                 body.additional_info.clone(),
             );
 
-            match kafka::publish_payment(kafka, &serde_json::to_string(&body.into_inner()).unwrap()).await {
+            let req = body.into_inner();
+
+            match kafka::publish_payment(kafka, &serde_json::to_string(&req).unwrap()).await {
                 Ok(_) => {
+                    let status = PaymentQueryResponse::new(
+                        Some(resp.reference_no.clone()), 
+                        Some(partner_ref.clone()), 
+                        Some(headers.external_id), 
+                        "00".to_string(), 
+                        "01", "initiated", 
+                        None, 
+                        req.amount.clone(), 
+                        req.fee_amount.clone(), 
+                        req.additional_info.clone()
+                    );
+
                     println!("payment published to kafka: {}", partner_ref);
-                    if let Ok(serialized) = serde_json::to_string(&resp) {
+                    if let Ok(serialized) = serde_json::to_string(&req) {
                         let _: Result<(), _> = conn.set_ex(&idempotency_key, serialized, IDEMPOTENCY_TTL).await;
                         println!("payment stored: {}", partner_ref);
-                        let _: Result<(), _> = conn.set_ex(&status_key, "{latestTransactionStatus:01, transactionStatusDesc:initiated}", IDEMPOTENCY_TTL).await;
+                        let _: Result<(), _> = conn.set_ex(&status_key, serde_json::to_string(&status).unwrap_or("".to_string()), IDEMPOTENCY_TTL).await;
                         println!("payment status stored: {}", partner_ref);
                     }
                     (Status::Ok, Json(ApiResponse::success(resp)))
