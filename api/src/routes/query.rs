@@ -107,8 +107,8 @@ pub async fn qr_query(
                 }
                 Err(_) => {
                     // not in redis — retrieve from db
-                    match query_legacy(db, &body.original_partner_reference_no.unwrap_or_default()).await {
-                        Some(resp) => (Status::ok, Json(ApiResponse::success(resp))),
+                    match query_legacy(db, &body.original_partner_reference_no.clone().unwrap_or_default()).await {
+                        Some(resp) => (Status::Ok, Json(ApiResponse::success(resp))),
                         None => (Status::NotFound, Json(ApiResponse::err(404, "01", "Transaction Not Found")))
                     }
                 }
