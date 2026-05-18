@@ -1,0 +1,24 @@
+# Build artifacts
+/target/
+/target
+
+# Cargo lock untuk library (opsional, tapi biarkan untuk binary project)
+# Cargo.lock
+
+# Environment variables (JANGAN push ke GitHub!)
+.env
+.env.local
+.env.production
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
