@@ -7,6 +7,7 @@ use redis::AsyncCommands;
 use redis::Client as RedisClient;
 use redis::cmd as redis_cmd;
 use sqlx::{Pool, Postgres};
+use tokio::join;
 use tokio::time::{sleep, Duration};
 
 use crate::models::{PaymentQueryResponse, PaymentRequest};
@@ -40,7 +41,7 @@ async fn store_to_db(
     db: &Pool<Postgres>, 
     status_code: &str, 
     status_desc: &str, 
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), anyhow::Error> {
     let amount_value: Option<i64> = job.amount
         .as_ref()
         .map(|a| a.value.trim_end_matches(".00").parse())
@@ -89,7 +90,7 @@ async fn update_redis_status(
     status_code: &str, 
     status_desc: &str, 
     paid_time: Option<String>
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), anyhow::Error> {
 
     let mut conn = redis.get_async_connection().await?;
 
@@ -123,8 +124,7 @@ async fn process_payment(job: PaymentRequest, redis: &RedisClient, db: &Pool<Pos
         match call_legacy(&job, db).await {
             Ok(_) => {
                 println!("payment success: {}", partner_reference_no);
-                let _ = update_redis_status(redis, &status_key, "00", "success", Some(Utc::now().format("%Y-%m-%dT%H:%M:%S+07:00").to_string())).await;
-                let _ = store_to_db(&job, db, "00", "success").await;
+                let _ = join!(update_redis_status(redis, &status_key, "00", "success", Some(Utc::now().format("%Y-%m-%dT%H:%M:%S+07:00").to_string())), store_to_db(&job, db, "00", "success"));
                 return;
             }
             Err(e) => {
@@ -139,8 +139,8 @@ async fn process_payment(job: PaymentRequest, redis: &RedisClient, db: &Pool<Pos
 
     // All retries failed — mark as failed
     println!("payment failed after {} retries: {}", MAX_RETRIES, partner_reference_no);
-    let _ = update_redis_status(redis, &status_key, "06", "failed", None).await;
-    let _ = store_to_db(&job, db, "06", "failed").await;
+
+    let _ = join!(update_redis_status(redis, &status_key, "06", "failed", None), store_to_db(&job, db, "06", "failed"));
 }
 
 pub async fn run_consumer(redis: RedisClient, db: Pool<Postgres>) {
