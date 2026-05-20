@@ -1,0 +1,42 @@
+[package]
+name = "capstone2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Web framework
+rocket = { version = "0.5.1", features = ["json"] }
+
+# Redis (async + connection manager)
+redis = { version = "0.26.1", features = ["tokio-comp", "connection-manager", "aio"] }
+
+# PostgreSQL (async, macros, runtime-tokio)
+sqlx = { version = "0.8.2", features = ["postgres", "runtime-tokio", "macros", "chrono"] }
+
+# Async runtime
+tokio = { version = "1.40.0", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Random number generation (simulate DB delay)
+rand = "0.8.5"
+
+# Unique IDs for lock tokens (safe lock release)
+uuid = { version = "1.10", features = ["v4"] }
+
+# Structured logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# DateTime for timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+# Atomic statistics (p95, counters)
+# Using std::sync::atomic — no extra dep needed
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
