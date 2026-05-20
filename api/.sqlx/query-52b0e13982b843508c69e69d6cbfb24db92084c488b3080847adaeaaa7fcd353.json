@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                SELECT merchant_pan, acquirer_name\n                FROM merchant_infos\n                WHERE merchant_id = $1\n                ",
+  "query": "\n                    SELECT merchant_pan, acquirer_name\n                    FROM merchant_infos\n                    WHERE merchant_id = $1\n                    ",
   "describe": {
     "columns": [
       {
@@ -24,5 +24,5 @@
       false
     ]
   },
-  "hash": "b731089c6eeb52aaae9d90e4de5bc8156e93ab9918faaf1403495fba51cb8eb5"
+  "hash": "52b0e13982b843508c69e69d6cbfb24db92084c488b3080847adaeaaa7fcd353"
 }

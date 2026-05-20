@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO payment (\n                partner_reference_no,\n                merchant_id,\n                sub_merchant_id,\n                amount_value,\n                amount_currency,\n                fee_value,\n                fee_currency,\n                status_code,\n                status_desc,\n                transaction_date\n            )\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c307e564cc404c2e65d58f9c032aec8f1a7b8c1f0ded9773da6c488da8d0dc66"
+}

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use rdkafka::producer::FutureProducer;
 use redis::AsyncCommands;
 use redis::Client as RedisClient;
@@ -11,7 +9,6 @@ use crate::kafka;
 use crate::models::ApiResponse;
 use crate::models::PaymentQueryResponse;
 use crate::models::{PaymentRequest, PaymentResponse, SnapHeaders};
-use crate::config::Config;
 
 const IDEMPOTENCY_TTL: u64 = 165;
 
@@ -49,7 +46,6 @@ pub async fn qr_payment(
     headers: SnapHeaders,
     redis: &State<RedisClient>,
     kafka: &State<FutureProducer>,
-    _network: &State<Arc<Config>>,
 ) -> (Status, Json<ApiResponse<PaymentResponse>>) {
     let partner_ref = match &body.partner_reference_no {
         Some(v) if !v.is_empty() => v.clone(),

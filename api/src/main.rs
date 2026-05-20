@@ -6,15 +6,16 @@ mod routes;
 mod kafka;
 mod consumer;
 mod config;
-mod db;
+mod legacy;
 
 use redis::Client as RedisClient;
 use rocket::{Build, Rocket};
 use rocket::serde::json::Json;
 use rocket::Request;
 use sqlx::postgres::PgPoolOptions;
-use crate::models::{ApiResponse};
 use crate::config::Config;
+use crate::models::{ApiResponse};
+use crate::legacy::LegacyClient;
 
 #[catch(400)]
 fn bad_request(_req: &Request) -> Json<ApiResponse<()>> {
@@ -48,26 +49,24 @@ async fn rocket() -> Rocket<Build> {
 
     let kafka = crate::kafka::create_producer("localhost:9092");
 
-    let config = Config::new();
-
     let db = PgPoolOptions::new()
-        .max_connections(50)
+        .max_connections(300)
         .connect("postgres://postgres:rahasia@localhost/api")
         .await
         .expect("Failed to connect to PostgreSQL");
 
+    let legacy = LegacyClient::new(Config::new(), db);
+
     let redis_consumer = redis.clone();
-    let db_consumer = db.clone();
-    let config_consumer = config.clone();
+    let legacy_consumer = legacy.clone();
 
     tokio::spawn(async move {
-        consumer::run_consumer(redis_consumer, db_consumer, config_consumer).await;
+        consumer::run_consumer(redis_consumer, legacy_consumer).await;
     });
 
     rocket::build()
         .manage(redis)
-        .manage(db)
-        .manage(config.clone())
+        .manage(legacy)
         .manage(kafka)
         .register("/", catchers![
             bad_request,

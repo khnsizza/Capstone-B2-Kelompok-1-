@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT amount_value, amount_currency, fee_value, fee_currency, status_code, status_desc, transaction_date\n        FROM payment\n        WHERE partner_reference_no = $1\n        ",
+  "query": "\n            SELECT amount_value, amount_currency, fee_value, fee_currency, status_code, status_desc, transaction_date\n            FROM payment\n            WHERE partner_reference_no = $1\n            ",
   "describe": {
     "columns": [
       {
@@ -54,5 +54,5 @@
       false
     ]
   },
-  "hash": "f90be745a2f70fb1517527963c9c4aa41ef7974bcae73217cffb90b2618f068e"
+  "hash": "67e686fdbc85e30f843612320524a4a01dd949fd463016c1226d8570b6a14f8d"
 }

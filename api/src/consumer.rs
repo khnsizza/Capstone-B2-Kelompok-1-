@@ -5,18 +5,14 @@ use rdkafka::message::Message;
 use redis::AsyncCommands;
 use redis::Client as RedisClient;
 use redis::cmd as redis_cmd;
-use sqlx::{Pool, Postgres};
 use std::sync::Arc;
 use tokio::join;
 use tokio::time::{sleep, Duration};
 
-
-use crate::config::Config;
+use crate::legacy::LegacyClient;
 use crate::models::{PaymentQueryResponse, PaymentRequest};
-use crate::db;
 
 const MAX_RETRIES: u32 = 3;
-const RETRY_DELAY_MS: u64 = 55000;
 
 /*struct PaymentJob {
     partner_reference_no: String,
@@ -54,7 +50,7 @@ async fn update_redis_status(
     Ok(())
 }
 
-async fn process_payment(job: PaymentRequest, redis: &RedisClient, db: &Pool<Postgres>, config: Arc<Config>) {
+async fn process_payment(job: PaymentRequest, redis: &RedisClient, legacy: &LegacyClient) {
     let partner_reference_no = job.partner_reference_no.as_ref().unwrap_or(&String::from("")).clone();
     let status_key = format!("payment_status:{}", partner_reference_no);
 
@@ -63,12 +59,12 @@ async fn process_payment(job: PaymentRequest, redis: &RedisClient, db: &Pool<Pos
     for attempt in 1..=MAX_RETRIES {
         println!("attempt {} for {}", attempt, partner_reference_no);
 
-        match db::create_payment(&job, db, config.clone()).await {
+        match legacy.create_payment(&job).await {
             Ok(_) => {
                 println!("payment success: {}", partner_reference_no);
                 let _ = join!(
                     update_redis_status(redis, &status_key, "00", "success", Some(Utc::now().format("%Y-%m-%dT%H:%M:%S+07:00").to_string())), 
-                    db::store_payment(&job, db, "00", "success")
+                    legacy.store_payment(&job, "00", "success")
                 );
                 return;
             }
@@ -76,7 +72,7 @@ async fn process_payment(job: PaymentRequest, redis: &RedisClient, db: &Pool<Pos
                 println!("attempt {} failed: {}", attempt, e);
                 let _ = update_redis_status(redis, &status_key, "03", "pending", None).await;
                 if attempt < MAX_RETRIES {
-                    sleep(Duration::from_millis(RETRY_DELAY_MS as u64)).await;
+                    sleep(Duration::from_millis(100)).await;
                 }
             }
         }
@@ -85,10 +81,13 @@ async fn process_payment(job: PaymentRequest, redis: &RedisClient, db: &Pool<Pos
     // All retries failed — mark as failed
     println!("payment failed after {} retries: {}", MAX_RETRIES, partner_reference_no);
 
-    let _ = join!(update_redis_status(redis, &status_key, "06", "failed", None), db::store_payment(&job, db, "06", "failed"));
+    let _ = join!(
+        update_redis_status(redis, &status_key, "06", "failed", None), 
+        legacy.store_payment(&job, "06", "failed")
+    );
 }
 
-pub async fn run_consumer(redis: RedisClient, db: Pool<Postgres>, config: Arc<Config>) {
+pub async fn run_consumer(redis: RedisClient, legacy: Arc<LegacyClient>) {
     let consumer: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", "localhost:9092")
         .set("group.id", "payment-consumer")
@@ -116,10 +115,9 @@ pub async fn run_consumer(redis: RedisClient, db: Pool<Postgres>, config: Arc<Co
                 match serde_json::from_str::<PaymentRequest>(&payload) {
                     Ok(job) => {
                         let redis_clone = redis.clone();
-                        let db_clone = db.clone();
-                        let config_clone = config.clone();
+                        let legacy_clone = legacy.clone();
                         tokio::spawn(async move {
-                            process_payment(job, &redis_clone, &db_clone, config_clone).await;
+                            process_payment(job, &redis_clone, &legacy_clone).await;
                         });
                         consumer.commit_message(&msg, CommitMode::Async).unwrap();
                     }

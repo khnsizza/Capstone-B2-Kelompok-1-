@@ -1,55 +1,20 @@
-use chrono::Utc;
 use redis::AsyncCommands;
 use redis::Client as RedisClient;
 use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
-use sqlx::PgPool;
+use std::sync::Arc;
 
-use crate::models::Amount;
+use crate::legacy::LegacyClient;
 use crate::models::ApiResponse;
 use crate::models::{PaymentQueryRequest, PaymentQueryResponse, SnapHeaders};
-
-async fn query_legacy(db: &PgPool, partner_reference: &str) -> Option<PaymentQueryResponse> {
-    let row = sqlx::query!(
-        r#"
-        SELECT amount_value, amount_currency, fee_value, fee_currency, status_code, status_desc, transaction_date
-        FROM payment
-        WHERE partner_reference_no = $1
-        "#,
-        partner_reference
-    )
-    .fetch_one(db)
-    .await
-    .ok()?;
-
-    Some(PaymentQueryResponse::new(
-        Some("12".to_string()), 
-        Some(partner_reference.to_string()), 
-        Some("fdfd".to_string()), 
-        "fdfd".to_string(), 
-        &row.status_code, 
-        &row.status_desc, 
-        Some(row.transaction_date.to_rfc3339()), 
-        Some(Amount {
-            value: format!("{}.00", row.amount_value.unwrap_or_default().to_string()),
-            currency: row.amount_currency.unwrap_or_default(),
-        }), 
-        Some(Amount {
-            value: format!("{}.00", row.fee_value.unwrap_or_default().to_string()),
-            currency: row.fee_currency.unwrap_or_default(),
-        }),
-        None
-    ))
-}
 
 #[post("/v1.0/qr/qr-mpm-query", format = "json", data = "<body>")]
 pub async fn qr_query(
     body: Json<PaymentQueryRequest>,
     _headers: SnapHeaders,
     redis: &State<RedisClient>,
-    db: &State<PgPool>,
+    legacy: &State<Arc<LegacyClient>>,
 ) -> (Status, Json<ApiResponse<PaymentQueryResponse>>) {
     if body.service_code.is_empty() {
         return (
@@ -107,9 +72,10 @@ pub async fn qr_query(
                 }
                 Err(_) => {
                     // not in redis — retrieve from db
-                    match query_legacy(db, &body.original_partner_reference_no.clone().unwrap_or_default()).await {
-                        Some(resp) => (Status::Ok, Json(ApiResponse::success(resp))),
-                        None => (Status::NotFound, Json(ApiResponse::err(404, "01", "Transaction Not Found")))
+                    match legacy.query_payment(&body.original_partner_reference_no.clone().unwrap_or_default()).await {
+                        Ok(Some(resp)) => (Status::Ok, Json(ApiResponse::success(resp))),
+                        Ok(None) => (Status::NotFound, Json(ApiResponse::err(404, "01", "Transaction Not Found"))),
+                        Err(_) => (Status::InternalServerError, Json(ApiResponse::err(500, "00", "General Error"))),
                     }
                 }
             }

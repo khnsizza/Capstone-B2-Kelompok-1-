@@ -6,14 +6,12 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 use rocket::State;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
 use tokio::time::{sleep, Duration};
 
+use crate::legacy::LegacyClient;
 use crate::models::ApiResponse;
 use crate::models::Merchant;
 use crate::models::{Amount, QrDecodeRequest, QrDecodeResponse, SnapHeaders};
-use crate::config::Config;
-use crate::db;
 
 const CACHE_TTL: u64 = 600; // 10 minutes per proposal
 const LOCK_TTL: usize = 5;  // 5 seconds per proposal
@@ -77,13 +75,26 @@ fn merchant_key(qr_content: &str) -> String {
     format!("merchant:{}", hash)
 }
 
+async fn query_legacy(key: &str, req: &QrDecodeRequest, legacy: Arc<LegacyClient>) -> Result<QrDecodeResponse, String> {
+    match legacy.fetch_merchant(key).await {
+        Ok(Some(merchant)) => Ok(QrDecodeResponse::new(
+            req.partner_reference_no.clone(), 
+            merchant, 
+            extract_amount(&req.qr_content), 
+            None, 
+            req.additional_info.clone()
+        )),
+        Ok(None) => Err("Invalid Merchant".into()),
+        Err(e) => Err(format!("Legacy error: {}", e)),
+    }
+}
+
 #[post("/v1.0/qr/qr-mpm-decode", format = "json", data = "<body>")]
 pub async fn qr_decode(
     body: Json<QrDecodeRequest>,
     _headers: SnapHeaders,
     redis: &State<RedisClient>,
-    db: &State<PgPool>,
-    config: &State<Arc<Config>>
+    legacy: &State<Arc<LegacyClient>>,
 ) -> (Status, Json<ApiResponse<QrDecodeResponse>>) {
     if body.qr_content.is_empty() {
         return (
@@ -99,7 +110,7 @@ pub async fn qr_decode(
         );
     }
 
-    let config = config.inner();
+    let legacy = legacy.inner().clone();
 
     let transaction_amount = extract_amount(&body.qr_content);
 
@@ -114,29 +125,23 @@ pub async fn qr_decode(
         Err(e) => {
             println!("redis error: {}", e);
             //let resp = query_legacy(&body.qr_content, db).await;
-            if let Some(merchant) = db::fetch_merchant(&db_key, db, config.clone()).await {
-                return (
-                    Status::Ok,
-                    Json(
-                        ApiResponse::success(
-                            QrDecodeResponse::new(
-                                body.partner_reference_no.clone(), 
-                                merchant, 
-                                transaction_amount, 
-                                None, 
-                                None
-                            )
-                        )
-                    )
-                );
+            let resp = query_legacy(&db_key, &body, legacy.clone()).await;
+            match resp {
+                Ok(r) => return (Status::Ok, Json(ApiResponse::success(r))),
+                Err(e) => if e.contains("Invalid Merchant") {
+                    return (Status::NotFound, Json(ApiResponse::err(404, "08", "Invalid Merchant")));
+                } else {
+                    return (Status::InternalServerError, Json(ApiResponse::err(504, "00", "Timeout")));
+                }
             }
-            return (Status::NotFound, Json(ApiResponse::err(404, "08", "Invalid Merchant")))
+            //return (Status::NotFound, Json(ApiResponse::err(404, "08", "Invalid Merchant")))
         }
     };
 
     // ── Check cache ───────────────────────────────────────────────────────
     if let Ok(cached) = conn.get::<_, String>(&cache_key).await {
         println!("cache hit: {}", cache_key);
+
         if let Ok(merchant) = serde_json::from_str::<Merchant>(&cached) {
             return (
                 Status::Ok,
@@ -172,30 +177,21 @@ pub async fn qr_decode(
         println!("lock acquired: {}", lock_key);
 
         // ── Query legacy system ───────────────────────────────────────────
-        let merchant = match db::fetch_merchant(&db_key, db, config.clone()).await {
-            Some(merchant) => {
-                if let Ok(serialized) = serde_json::to_string(&merchant) {
-                    match conn
-                        .set_ex::<_, _, ()>(&cache_key, serialized, CACHE_TTL)
-                        .await
-                    {
+        let resp = match query_legacy(&db_key, &body, legacy.clone()).await {
+            Ok(r) => {
+                // Cache the result for future requests
+                if let Ok(serialized) = serde_json::to_string(&r.merchant) {
+                    match conn.set_ex::<_, _, ()>(&cache_key, serialized, CACHE_TTL).await {
                         Ok(_) => println!("cached: {}", cache_key),
                         Err(e) => println!("cache set error: {}", e),
                     }
                 }
-
-                merchant
-            }
-
-            None => {
-                return (
-                    Status::NotFound,
-                    Json(ApiResponse::err(
-                        404,
-                        "08",
-                        "Invalid Merchant",
-                    )),
-                )
+                (Status::Ok, Json(ApiResponse::success(r)))
+            },
+            Err(e) => if e.contains("Invalid Merchant") {
+                (Status::NotFound, Json(ApiResponse::err(404, "08", "Invalid Merchant")))
+            } else {
+                (Status::InternalServerError, Json(ApiResponse::err(504, "00", "Timeout")))
             }
         };
 
@@ -203,20 +199,7 @@ pub async fn qr_decode(
         let _: Result<(), _> = conn.del(&lock_key).await;
         println!("lock released: {}", lock_key);
 
-        (
-            Status::Ok, 
-            Json(
-                ApiResponse::success(
-                    QrDecodeResponse::new(
-                            body.partner_reference_no.clone(), 
-                            merchant, 
-                            transaction_amount, 
-                            None, 
-                            None
-                        )
-                    )
-            )
-        )
+        resp
     } else {
         println!("waiting for lock: {}", lock_key);
 
@@ -247,7 +230,7 @@ pub async fn qr_decode(
 
         // ── Fallback: query legacy directly ───────────────────────────────
         println!("fallback: querying legacy directly");
-        if let Some(merchant) = db::fetch_merchant(&db_key, db, config.clone()).await {
+        if let Ok(Some(merchant)) = legacy.fetch_merchant(&db_key).await {
             return (
                 Status::Ok,
                 Json(
