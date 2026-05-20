@@ -29,7 +29,7 @@ async fn call_legacy(job: &PaymentRequest, db: &Pool<Postgres>, config: Arc<Conf
 
     sleep(Duration::from_millis(config.effective_latency())).await;
 
-    if rand::thread_rng().gen_bool(config.error_rate() / 100.0) {
+    if rand::thread_rng().gen_bool(config.error_rate()) {
         return Err("Legacy system timeout".into());
     }
 
