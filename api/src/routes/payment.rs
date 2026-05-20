@@ -9,7 +9,7 @@ use crate::kafka;
 use crate::models::ApiResponse;
 use crate::models::PaymentQueryResponse;
 use crate::models::{PaymentRequest, PaymentResponse, SnapHeaders};
-use crate::routes::admin::NetworkConfig;
+use crate::config::Config;
 
 const IDEMPOTENCY_TTL: u64 = 165;
 
@@ -47,7 +47,7 @@ pub async fn qr_payment(
     headers: SnapHeaders,
     redis: &State<RedisClient>,
     kafka: &State<FutureProducer>,
-    _network: &State<NetworkConfig>,
+    _network: &State<Config>,
 ) -> (Status, Json<ApiResponse<PaymentResponse>>) {
     let partner_ref = match &body.partner_reference_no {
         Some(v) if !v.is_empty() => v.clone(),

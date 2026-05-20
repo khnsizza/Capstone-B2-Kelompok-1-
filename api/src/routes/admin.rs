@@ -1,35 +1,36 @@
-use rocket::serde::json::{json, Value};
+use rocket::serde::json::{json, Json, Value};
 use rocket::State;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use crate::config::{Config, ConfigUpdate};
 
-pub struct NetworkConfig {
-    pub bad_network: AtomicBool,
+#[get("/admin/config")]
+pub fn get_config(config: &State<Arc<Config>>) -> Value {
+    json!({
+        "latencyMinMs": config.latency_min(),
+        "latencyMaxMs": config.latency_max(),
+        "jitterMs": config.jitter(),
+        "errorRate": config.error_rate() * 100.0,
+    })
 }
 
-impl NetworkConfig {
-    pub fn new() -> Self {
-        Self { bad_network: AtomicBool::new(false) }
+#[post("/admin/config", format = "json", data = "<body>")]
+pub fn update_config(body: Json<ConfigUpdate>, config: &State<Arc<Config>>) -> Value {
+    if let Some(min) = body.latency_min_ms {
+        let max = body.latency_max_ms.unwrap_or(config.latency_max());
+        config.set_latency(min, max);
+    } else if let Some(max) = body.latency_max_ms {
+        config.set_latency(config.latency_min(), max);
     }
-
-    pub fn is_bad(&self) -> bool {
-        self.bad_network.load(Ordering::Relaxed)
+    if let Some(jitter) = body.jitter_ms {
+        config.set_jitter(jitter);
     }
-}
-
-#[post("/admin/network/bad")]
-pub fn set_bad_network(config: &State<NetworkConfig>) -> Value {
-    config.bad_network.store(true, Ordering::Relaxed);
-    json!({ "network": "bad" })
-}
-
-#[post("/admin/network/good")]
-pub fn set_good_network(config: &State<NetworkConfig>) -> Value {
-    config.bad_network.store(false, Ordering::Relaxed);
-    json!({ "network": "good" })
-}
-
-#[get("/admin/network")]
-pub fn get_network_status(config: &State<NetworkConfig>) -> Value {
-    let status = if config.bad_network.load(Ordering::Relaxed) { "bad" } else { "good" };
-    json!({ "network": status })
+    if let Some(rate) = body.error_rate {
+        config.set_error_rate(rate);
+    }
+    json!({
+        "latencyMinMs": config.latency_min(),
+        "latencyMaxMs": config.latency_max(),
+        "jitterMs": config.jitter(),
+        "errorRate": config.error_rate() * 100.0,
+    })
 }

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use redis::AsyncCommands;
 use redis::Client as RedisClient;
 use rocket::http::Status;
@@ -11,6 +13,7 @@ use rand::Rng;
 use crate::models::ApiResponse;
 use crate::models::Merchant;
 use crate::models::{Amount, MerchantInfo, QrDecodeRequest, QrDecodeResponse, SnapHeaders};
+use crate::config::Config;
 
 const CACHE_TTL: u64 = 600; // 10 minutes per proposal
 const LOCK_TTL: usize = 5;  // 5 seconds per proposal
@@ -74,10 +77,10 @@ fn merchant_key(qr_content: &str) -> String {
     format!("merchant:{}", hash)
 }
 
-async fn query_legacy(qr_content: &str, db: &PgPool) -> Option<Merchant> {
-    // Simulate legacy system delay 400-700ms
-    let delay = rand::thread_rng().gen_range(400..=700);
-    sleep(Duration::from_millis(delay)).await;
+async fn query_legacy(qr_content: &str, db: &PgPool, config: Arc<Config>) -> Option<Merchant> {
+    // Simulate legacy system delay
+    //let delay = rand::thread_rng().gen_range(400..=700);
+    sleep(Duration::from_millis(config.effective_latency())).await;
 
     // 1. Get merchant
     let key = merchant_key(qr_content)[9..].to_string();
@@ -148,6 +151,7 @@ pub async fn qr_decode(
     _headers: SnapHeaders,
     redis: &State<RedisClient>,
     db: &State<PgPool>,
+    config: &State<Arc<Config>>
 ) -> (Status, Json<ApiResponse<QrDecodeResponse>>) {
     if body.qr_content.is_empty() {
         return (
@@ -163,6 +167,8 @@ pub async fn qr_decode(
         );
     }
 
+    let config = config.inner();
+
     let transaction_amount = extract_amount(&body.qr_content);
 
     let cache_key = qr_cache_key(&body.qr_content);
@@ -174,7 +180,7 @@ pub async fn qr_decode(
         Err(e) => {
             println!("redis error: {}", e);
             //let resp = query_legacy(&body.qr_content, db).await;
-            if let Some(merchant) = query_legacy(&body.qr_content,db).await {
+            if let Some(merchant) = query_legacy(&body.qr_content,db, config.clone()).await {
                 return (
                     Status::Ok,
                     Json(
@@ -232,7 +238,7 @@ pub async fn qr_decode(
         println!("lock acquired: {}", lock_key);
 
         // ── Query legacy system ───────────────────────────────────────────
-        let merchant = match query_legacy(&body.qr_content, db).await {
+        let merchant = match query_legacy(&body.qr_content, db, config.clone()).await {
             Some(merchant) => {
                 if let Ok(serialized) = serde_json::to_string(&merchant) {
                     match conn
@@ -307,7 +313,7 @@ pub async fn qr_decode(
 
         // ── Fallback: query legacy directly ───────────────────────────────
         println!("fallback: querying legacy directly");
-        if let Some(merchant) = query_legacy(&body.qr_content, db).await {
+        if let Some(merchant) = query_legacy(&body.qr_content, db, config.clone()).await {
             return (
                 Status::Ok,
                 Json(

@@ -5,6 +5,9 @@ mod models;
 mod routes;
 mod kafka;
 mod consumer;
+mod config;
+
+use std::sync::Arc;
 
 use redis::Client as RedisClient;
 use rocket::{Build, Rocket};
@@ -12,7 +15,7 @@ use rocket::serde::json::Json;
 use rocket::Request;
 use sqlx::postgres::PgPoolOptions;
 use crate::models::{ApiResponse};
-use routes::admin::NetworkConfig;
+use crate::config::Config;
 
 #[catch(400)]
 fn bad_request(_req: &Request) -> Json<ApiResponse<()>> {
@@ -46,6 +49,8 @@ async fn rocket() -> Rocket<Build> {
 
     let kafka = crate::kafka::create_producer("localhost:9092");
 
+    let config = Config::new();
+
     let db = PgPoolOptions::new()
         .max_connections(50)
         .connect("postgres://postgres:rahasia@localhost/api")
@@ -54,14 +59,16 @@ async fn rocket() -> Rocket<Build> {
 
     let redis_consumer = redis.clone();
     let db_consumer = db.clone();
+    let config_consumer = config.clone();
+
     tokio::spawn(async move {
-        consumer::run_consumer(redis_consumer, db_consumer).await;
+        consumer::run_consumer(redis_consumer, db_consumer, config_consumer).await;
     });
 
     rocket::build()
         .manage(redis)
         .manage(db)
-        .manage(NetworkConfig::new())
+        .manage(config.clone())
         .manage(kafka)
         .register("/", catchers![
             bad_request,
@@ -75,9 +82,8 @@ async fn rocket() -> Rocket<Build> {
             routes::decode::qr_decode,
             routes::payment::qr_payment,
             routes::ott::apply_ott,
-            routes::admin::set_bad_network,
-            routes::admin::set_good_network,
-            routes::admin::get_network_status,
+            routes::admin::get_config,
+            routes::admin::update_config,
             routes::query::qr_query,
         ])
 }

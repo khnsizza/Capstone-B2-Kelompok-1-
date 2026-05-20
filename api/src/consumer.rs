@@ -7,9 +7,11 @@ use redis::AsyncCommands;
 use redis::Client as RedisClient;
 use redis::cmd as redis_cmd;
 use sqlx::{Pool, Postgres};
+use std::sync::Arc;
 use tokio::join;
 use tokio::time::{sleep, Duration};
 
+use crate::config::Config;
 use crate::models::{PaymentQueryResponse, PaymentRequest};
 
 const MAX_RETRIES: u32 = 3;
@@ -23,13 +25,11 @@ const RETRY_DELAY_MS: u64 = 55000;
     additional_info: Option<serde_json::Value>,
 }*/
 
-async fn call_legacy(job: &PaymentRequest, db: &Pool<Postgres>) -> Result<(), String> {
-    // TODO: replace with real legacy system call
-    // For now simulate 400-700ms delay with 2% failure rate
-    let delay = rand::thread_rng().gen_range(400..=700);
-    sleep(Duration::from_millis(delay)).await;
+async fn call_legacy(job: &PaymentRequest, db: &Pool<Postgres>, config: Arc<Config>) -> Result<(), String> {
 
-    if rand::thread_rng().gen_bool(0.02) {
+    sleep(Duration::from_millis(config.effective_latency())).await;
+
+    if rand::thread_rng().gen_bool(config.error_rate() / 100.0) {
         return Err("Legacy system timeout".into());
     }
 
@@ -112,7 +112,7 @@ async fn update_redis_status(
     Ok(())
 }
 
-async fn process_payment(job: PaymentRequest, redis: &RedisClient, db: &Pool<Postgres>) {
+async fn process_payment(job: PaymentRequest, redis: &RedisClient, db: &Pool<Postgres>, config: Arc<Config>) {
     let partner_reference_no = job.partner_reference_no.as_ref().unwrap_or(&String::from("")).clone();
     let status_key = format!("payment_status:{}", partner_reference_no);
 
@@ -121,10 +121,13 @@ async fn process_payment(job: PaymentRequest, redis: &RedisClient, db: &Pool<Pos
     for attempt in 1..=MAX_RETRIES {
         println!("attempt {} for {}", attempt, partner_reference_no);
 
-        match call_legacy(&job, db).await {
+        match call_legacy(&job, db, config.clone()).await {
             Ok(_) => {
                 println!("payment success: {}", partner_reference_no);
-                let _ = join!(update_redis_status(redis, &status_key, "00", "success", Some(Utc::now().format("%Y-%m-%dT%H:%M:%S+07:00").to_string())), store_to_db(&job, db, "00", "success"));
+                let _ = join!(
+                    update_redis_status(redis, &status_key, "00", "success", Some(Utc::now().format("%Y-%m-%dT%H:%M:%S+07:00").to_string())), 
+                    store_to_db(&job, db, "00", "success")
+                );
                 return;
             }
             Err(e) => {
@@ -143,7 +146,7 @@ async fn process_payment(job: PaymentRequest, redis: &RedisClient, db: &Pool<Pos
     let _ = join!(update_redis_status(redis, &status_key, "06", "failed", None), store_to_db(&job, db, "06", "failed"));
 }
 
-pub async fn run_consumer(redis: RedisClient, db: Pool<Postgres>) {
+pub async fn run_consumer(redis: RedisClient, db: Pool<Postgres>, config: Arc<Config>) {
     let consumer: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", "localhost:9092")
         .set("group.id", "payment-consumer")
@@ -172,8 +175,9 @@ pub async fn run_consumer(redis: RedisClient, db: Pool<Postgres>) {
                     Ok(job) => {
                         let redis_clone = redis.clone();
                         let db_clone = db.clone();
+                        let config_clone = config.clone();
                         tokio::spawn(async move {
-                            process_payment(job, &redis_clone, &db_clone).await;
+                            process_payment(job, &redis_clone, &db_clone, config_clone).await;
                         });
                         consumer.commit_message(&msg, CommitMode::Async).unwrap();
                     }
