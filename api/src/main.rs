@@ -6,8 +6,7 @@ mod routes;
 mod kafka;
 mod consumer;
 mod config;
-
-use std::sync::Arc;
+mod db;
 
 use redis::Client as RedisClient;
 use rocket::{Build, Rocket};

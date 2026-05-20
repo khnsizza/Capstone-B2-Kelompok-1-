@@ -8,12 +8,12 @@ use rocket::State;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tokio::time::{sleep, Duration};
-use rand::Rng;
 
 use crate::models::ApiResponse;
 use crate::models::Merchant;
-use crate::models::{Amount, MerchantInfo, QrDecodeRequest, QrDecodeResponse, SnapHeaders};
+use crate::models::{Amount, QrDecodeRequest, QrDecodeResponse, SnapHeaders};
 use crate::config::Config;
+use crate::db;
 
 const CACHE_TTL: u64 = 600; // 10 minutes per proposal
 const LOCK_TTL: usize = 5;  // 5 seconds per proposal
@@ -77,74 +77,6 @@ fn merchant_key(qr_content: &str) -> String {
     format!("merchant:{}", hash)
 }
 
-async fn query_legacy(qr_content: &str, db: &PgPool, config: Arc<Config>) -> Option<Merchant> {
-    // Simulate legacy system delay
-    //let delay = rand::thread_rng().gen_range(400..=700);
-    sleep(Duration::from_millis(config.effective_latency())).await;
-
-    // 1. Get merchant
-    let key = merchant_key(qr_content)[9..].to_string();
-    let row = sqlx::query!(
-        r#"
-        SELECT id, name, category, city, merchant_id
-        FROM merchants
-        WHERE qr_code = $1
-        "#,
-        key
-    )
-    .fetch_optional(db)
-    .await;
-
-    println!("fetched!");
-    println!("qr_content: {}", key);
-    println!("fetched content: {:?}", row);
-
-    match row {
-        Ok(Some(m)) => {
-            println!("matched!");
-            // 2. Get PANs from merchant_infos (THIS is your fix)
-            let pans: Result<Vec<_>, sqlx::Error> = sqlx::query!(
-                r#"
-                SELECT merchant_pan, acquirer_name
-                FROM merchant_infos
-                WHERE merchant_id = $1
-                "#,
-                m.id
-            )
-            .fetch_all(db)
-            .await;
-
-            println!("fetched!!");
-
-            let infos = match pans {
-                Ok(rows) => rows
-                    .into_iter()
-                    .map(|r| MerchantInfo {
-                        merchant_pan: r.merchant_pan,
-                        acquirer_name: r.acquirer_name,
-                    })
-                    .collect(),
-                Err(_) => vec![],
-            };
-
-            println!("length: {}", infos.len());
-
-            Some(Merchant {
-                id: m.merchant_id,
-                merchant_name: m.name,
-                merchant_category: m.category,
-                merchant_location: m.city,
-                merchant_infos: infos
-            })
-        }
-
-        _ => {
-            println!("Not matched!");
-            None
-        },
-    }
-}
-
 #[post("/v1.0/qr/qr-mpm-decode", format = "json", data = "<body>")]
 pub async fn qr_decode(
     body: Json<QrDecodeRequest>,
@@ -175,12 +107,14 @@ pub async fn qr_decode(
     
     let lock_key = format!("lock:{}", cache_key);
 
+    let db_key = merchant_key(&body.qr_content)[9..].to_string();
+
     let mut conn = match redis.get_async_connection().await {
         Ok(c) => c,
         Err(e) => {
             println!("redis error: {}", e);
             //let resp = query_legacy(&body.qr_content, db).await;
-            if let Some(merchant) = query_legacy(&body.qr_content,db, config.clone()).await {
+            if let Some(merchant) = db::fetch_merchant(&db_key, db, config.clone()).await {
                 return (
                     Status::Ok,
                     Json(
@@ -238,7 +172,7 @@ pub async fn qr_decode(
         println!("lock acquired: {}", lock_key);
 
         // ── Query legacy system ───────────────────────────────────────────
-        let merchant = match query_legacy(&body.qr_content, db, config.clone()).await {
+        let merchant = match db::fetch_merchant(&db_key, db, config.clone()).await {
             Some(merchant) => {
                 if let Ok(serialized) = serde_json::to_string(&merchant) {
                     match conn
@@ -313,7 +247,7 @@ pub async fn qr_decode(
 
         // ── Fallback: query legacy directly ───────────────────────────────
         println!("fallback: querying legacy directly");
-        if let Some(merchant) = query_legacy(&body.qr_content, db, config.clone()).await {
+        if let Some(merchant) = db::fetch_merchant(&db_key, db, config.clone()).await {
             return (
                 Status::Ok,
                 Json(
