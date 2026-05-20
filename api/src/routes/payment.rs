@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use rdkafka::producer::FutureProducer;
 use redis::AsyncCommands;
 use redis::Client as RedisClient;
@@ -47,7 +49,7 @@ pub async fn qr_payment(
     headers: SnapHeaders,
     redis: &State<RedisClient>,
     kafka: &State<FutureProducer>,
-    _network: &State<Config>,
+    _network: &State<Arc<Config>>,
 ) -> (Status, Json<ApiResponse<PaymentResponse>>) {
     let partner_ref = match &body.partner_reference_no {
         Some(v) if !v.is_empty() => v.clone(),
